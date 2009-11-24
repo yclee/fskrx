@@ -77,6 +77,8 @@ static void cid_put_msg(void *user_data, const uint8_t *msg, int len)
 }
 
 #ifndef NO_DATALINK_ANALYSIS
+static unsigned int show_bit = 0;
+
 typedef struct
 {
     int consecutive_ones;
@@ -107,6 +109,7 @@ static void adsi_rx_put_bit(void *user_data, int bit)
             break;
         case PUTBIT_CARRIER_DOWN:
             printf("Carrier down.\n");
+	    show_bit = 0;
             break;
         default:
             printf("Unexpected special put bit value - %d!\n", bit);
@@ -121,12 +124,14 @@ static void adsi_rx_put_bit(void *user_data, int bit)
         {
             /* Start bit */
             s->bit_pos++;
+	    if (show_bit) printf("Start\n");
             if (s->consecutive_ones > 10)
             {
                 /* This is a line idle condition, which means we should
                    restart message acquisition */
                 s->msg_len = 0;
 		printf("=======Restart acquisition=======\n");
+		show_bit = 1;
             }
             s->consecutive_ones = 0;
         }
@@ -140,6 +145,7 @@ static void adsi_rx_put_bit(void *user_data, int bit)
         s->in_progress >>= 1;
         if (bit)
             s->in_progress |= 0x80;
+	if (show_bit) printf("Bit %d:%d\n", s->bit_pos, bit);
         s->bit_pos++;
     }
     else
