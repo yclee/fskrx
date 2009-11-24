@@ -5,6 +5,9 @@
 /* Uncomment if analysis of datalink is not required. */
 /* #define NO_DATALINK_ANALYSIS */
 
+/* Uncomment if index is not required. Will be much faster. */
+/* #define NO_INDEX */
+
 #if 1 //def USE_SPANDSP_CALLERID
 #include <inttypes.h>
 #ifdef NO_DATALINK_ANALYSIS
@@ -30,7 +33,11 @@
 #endif
 #endif
 
+#ifdef NO_INDEX
 #define BLOCK_SIZE 160	/* 20ms */
+#else
+#define BLOCK_SIZE 1 	/* One sample by one sample to show index */
+#endif
 
 static void cid_put_msg(void *user_data, const uint8_t *msg, int len)
 {
@@ -172,6 +179,9 @@ int main(int argc, char *argv[])
 {
 	static FILE *fh;
 	short linear[BLOCK_SIZE];
+#ifndef NO_INDEX
+	unsigned int index = 0;
+#endif
 #ifdef NO_DATALINK_ANALYSIS
 	adsi_rx_state_t adsi;
 #else
@@ -203,6 +213,10 @@ int main(int argc, char *argv[])
 		if (fread((char *)linear, 2, BLOCK_SIZE, fh)!= BLOCK_SIZE)
 			break;
 
+#ifndef NO_INDEX
+		index += BLOCK_SIZE;
+		printf("\r%d:", index);
+#endif
 #ifdef NO_DATALINK_ANALYSIS
 		fsk_rx(&adsi.fskrx, linear, BLOCK_SIZE);
 #else
