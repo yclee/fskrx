@@ -8,6 +8,8 @@
 /* Uncomment if index is not required. Will be much faster. */
 /* #define NO_INDEX */
 
+//#define MY_FSK_RX(x...) fsk_rx(x)
+
 #if 1 //def USE_SPANDSP_CALLERID
 #include <inttypes.h>
 #ifdef NO_DATALINK_ANALYSIS
@@ -78,6 +80,7 @@ static void cid_put_msg(void *user_data, const uint8_t *msg, int len)
 
 #ifndef NO_DATALINK_ANALYSIS
 static unsigned int show_bit = 0;
+static unsigned int show_baud = 0;
 
 typedef struct
 {
@@ -166,7 +169,7 @@ static void adsi_rx_put_bit(void *user_data, int bit)
                         if ((-sum & 0xFF) == s->msg[i])
                             cid_put_msg(NULL, s->msg, s->msg_len - 1);
                         else
-                            printf("Sumcheck failed\n");
+                            printf("Checksum failed, should be 0x%x\n", -sum & 0xFF);
                         s->msg_len = 0;
                     }
             }
@@ -181,12 +184,137 @@ static void adsi_rx_put_bit(void *user_data, int bit)
 }
 #endif
 
+#ifndef MY_FSK_RX
+#include "spandsp/complex.h"
+#include "spandsp/dds.h"
+static int MY_FSK_RX(fsk_rx_state_t *s, const int16_t *amp, int len)
+{
+    int buf_ptr;
+    int baudstate;
+    int i;
+    int j;
+    int16_t x;
+    int32_t dot;
+    int32_t sum;
+    int32_t power;
+    complexi_t ph;
+
+    buf_ptr = s->buf_ptr;
+
+    for (i = 0;  i < len;  i++)
+    {
+        /* If there isn't much signal, don't demodulate - it will only produce
+           useless junk results. */
+        /* There should be no DC in the signal, but sometimes there is.
+           We need to measure the power with the DC blocked, but not using
+           a slow to respond DC blocker. Use the most elementary HPF. */
+        x = amp[i] >> 1;
+        power = power_meter_update(&(s->power), x - s->last_sample);
+        s->last_sample = x;
+        if (s->signal_present)
+        {
+            /* Look for power below turn-off threshold to turn the carrier off */
+            if (power < s->carrier_off_power)
+            {
+                if (--s->signal_present <= 0)
+                {
+                    /* Count down a short delay, to ensure we push the last
+                       few bits through the filters before stopping. */
+                    s->put_bit(s->user_data, PUTBIT_CARRIER_DOWN);
+                    continue;
+                }
+            }
+        }
+        else
+        {
+            /* Look for power exceeding turn-on threshold to turn the carrier on */
+            if (power < s->carrier_on_power)
+                continue;
+            s->signal_present = 1;
+            s->put_bit(s->user_data, PUTBIT_CARRIER_UP);
+        }
+        /* Non-coherent FSK demodulation by correlation with the target tones
+           over a one baud interval. The slow V.xx specs. are too open ended
+           to allow anything fancier to be used. The dot products are calculated
+           using a sliding window approach, so the compute load is not that great. */
+        /* The *totally* asynchronous character to character behaviour of these
+           modems, when carrying async. data, seems to force a sample by sample
+           approach. */
+        for (j = 0;  j < 2;  j++)
+        {
+            s->dot_i[j] -= s->window_i[j][buf_ptr];
+            s->dot_q[j] -= s->window_q[j][buf_ptr];
+
+            ph = dds_complexi(&(s->phase_acc[j]), s->phase_rate[j]);
+            s->window_i[j][buf_ptr] = (ph.re*amp[i]) >> s->scaling_shift;
+            s->window_q[j][buf_ptr] = (ph.im*amp[i]) >> s->scaling_shift;
+
+            s->dot_i[j] += s->window_i[j][buf_ptr];
+            s->dot_q[j] += s->window_q[j][buf_ptr];
+        }
+        dot = s->dot_i[0] >> 15;
+        sum = dot*dot;
+        dot = s->dot_q[0] >> 15;
+        sum += dot*dot;
+        dot = s->dot_i[1] >> 15;
+        sum -= dot*dot;
+        dot = s->dot_q[1] >> 15;
+        sum -= dot*dot;
+        baudstate = (sum < 0);
+	if (show_baud) printf("%d\n", baudstate);
+
+        if (s->lastbit != baudstate)
+        {
+            s->lastbit = baudstate;
+            s->baud_chg ^= 1;
+	} else if (s->baud_chg) {
+            /* Ensure baudstate change to prevent one baudstate error. */
+            s->baud_chg = 0;
+            if (s->sync_mode)
+            {
+                /* For synchronous use (e.g. HDLC channels in FAX modems), nudge
+                   the baud phase gently, trying to keep it centred on the bauds. */
+                if (s->baud_pll < 0x8000)
+                    s->baud_pll += (s->baud_inc >> 3);
+                else
+                    s->baud_pll -= (s->baud_inc >> 3);
+            }
+            else
+            {
+                /* For async. operation, believe transitions completely, and
+                   sample appropriately. This allows instant start on the first
+                   transition. */
+                /* We must now be about half way to a sampling point. We do not do
+                   any fractional sample estimation of the transitions, so this is
+                   the most accurate baud alignment we can do. */
+                s->baud_pll = 0x8000 + s->baud_inc;
+            }
+
+        }
+        /* dirty fix: think more on transition to 1 */
+        if (!s->baud_chg || !baudstate)
+        if ((s->baud_pll += s->baud_inc) >= 0x10000)
+        {
+            /* We should be in the middle of a baud now, so report the current
+               state as the next bit */
+            s->baud_pll -= 0x10000;
+            s->put_bit(s->user_data, baudstate ^ s->baud_chg);
+        }
+        if (++buf_ptr >= s->correlation_span)
+            buf_ptr = 0;
+    }
+    s->buf_ptr = buf_ptr;
+    return 0;
+}
+#endif
+
 int main(int argc, char *argv[])
 {
 	static FILE *fh;
 	short linear[BLOCK_SIZE];
 #ifndef NO_INDEX
 	unsigned int index = 0;
+	unsigned int start_show_baud = -1;
 #endif
 #ifdef NO_DATALINK_ANALYSIS
 	adsi_rx_state_t adsi;
@@ -208,6 +336,8 @@ int main(int argc, char *argv[])
 				argv[1], strerror(errno));
 		exit(1);
 	}
+	if (argc >= 3)
+		start_show_baud = atoi(argv[2]);
 
 #ifdef NO_DATALINK_ANALYSIS
 	adsi_rx_init(&adsi, ADSI_STANDARD_CLASS, cid_put_msg, NULL);
@@ -222,11 +352,13 @@ int main(int argc, char *argv[])
 #ifndef NO_INDEX
 		index += BLOCK_SIZE;
 		printf("\r%d:", index);
+		if(index >= start_show_baud)
+			show_baud = 1;
 #endif
 #ifdef NO_DATALINK_ANALYSIS
-		fsk_rx(&adsi.fskrx, linear, BLOCK_SIZE);
+		MY_FSK_RX(&adsi.fskrx, linear, BLOCK_SIZE);
 #else
-		fsk_rx(&fskrx, linear, BLOCK_SIZE);
+		MY_FSK_RX(&fskrx, linear, BLOCK_SIZE);
 #endif
 	}
 
