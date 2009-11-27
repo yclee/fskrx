@@ -2,6 +2,8 @@
 #include <errno.h>
 #include <stdlib.h>	/* ssize_t, exit() */
 
+#define VERSION	"1.1"
+
 /* Uncomment if analysis of datalink is not required. */
 /* #define NO_DATALINK_ANALYSIS */
 
@@ -331,6 +333,12 @@ int main(int argc, char *argv[])
 	my_cid_state_t cid;
 #endif
 
+	printf("%s v"VERSION"\n", argv[0]);
+	if (argc < 2) {
+		printf("usage: %s <file> [start_to_show_sample]\n", argv[0]);
+		return 0;
+	}
+
 	if ((fh = fopen(argv[1], "r"))<0) {
 		fprintf(stderr, "Could not open %s for reading: %s\n", 
 				argv[1], strerror(errno));
@@ -364,4 +372,5 @@ int main(int argc, char *argv[])
 
 	printf("Done\n");
 	fclose(fh);
+	return 0;
 }
